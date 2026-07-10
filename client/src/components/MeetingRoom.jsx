@@ -1,152 +1,964 @@
-
-import socket from "../socket";
 import { useEffect, useRef, useState } from "react";
+import socket from "../socket";
+
+const configuration = {
+  iceServers: [
+    {
+      urls: "stun:stun.l.google.com:19302",
+    },
+  ],
+};
 
 function MeetingRoom({ name, roomId, leaveMeeting }) {
   const localVideo = useRef(null);
-  const localStream = useRef(null);
   const remoteVideo = useRef(null);
+
+  const localStream = useRef(null);
   const peerRef = useRef(null);
+  const remoteStreamRef = useRef(new MediaStream());
+  const videoSenderRef = useRef(null);
+const screenStreamRef = useRef(null);
+const previousBytesRef = useRef(0);
+const previousStatsTimeRef = useRef(0);
+const hasConnectedRef = useRef(false);
+
+const [isScreenSharing, setIsScreenSharing] = useState(false);
+
+  // Stores ICE candidates that arrive before remote description
+  const pendingCandidates = useRef([]);
 
   const [message, setMessage] = useState("");
   const [messages, setMessages] = useState([]);
-  const [micOn, setMicOn] = useState(true);
-  const [cameraOn, setCameraOn] = useState(true);
 
-  useEffect(() => {
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
+  const [micOn, setMicOn] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [networkStats, setNetworkStats] = useState({
+  status: "Waiting",
+  latency: 0,
+  bitrate: 0,
+  packetLoss: 0,
+});
+
+  async function startMedia() {
+    const combinedStream = new MediaStream();
+
+    // Request microphone separately
+    try {
+      const audioStream =
+        await navigator.mediaDevices.getUserMedia({
           audio: true,
+          video: false,
         });
-        localStream.current = stream;
 
-        localVideo.current.srcObject = stream;
+      audioStream.getAudioTracks().forEach((track) => {
+        combinedStream.addTrack(track);
+      });
+
+      setMicOn(true);
+      console.log("Microphone connected");
+    } catch (error) {
+      console.error("Microphone error:", error);
+      setMicOn(false);
+    }
+
+    // Request camera separately
+    try {
+      const videoStream =
+        await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+
+      videoStream.getVideoTracks().forEach((track) => {
+        combinedStream.addTrack(track);
+      });
+
+      setCameraOn(true);
+      console.log("Camera connected");
+    } catch (error) {
+      console.error("Camera error:", error);
+      setCameraOn(false);
+    }
+
+    localStream.current = combinedStream;
+
+    if (localVideo.current) {
+      localVideo.current.srcObject = combinedStream;
+    }
+  }
+
+  function createPeerConnection() {
+    if (peerRef.current) {
+      return peerRef.current;
+    }
+
+    const peer = new RTCPeerConnection(configuration);
+
+    peerRef.current = peer;
+
+    const stream = localStream.current;
+
+    const audioTrack = stream?.getAudioTracks()[0];
+    const videoTrack = stream?.getVideoTracks()[0];
+
+    /*
+      Important:
+      Even when this PC has no camera, it still creates
+      a video transceiver so it can RECEIVE phone video.
+    */
+
+    if (audioTrack) {
+      peer.addTrack(audioTrack, stream);
+    } else {
+      peer.addTransceiver("audio", {
+        direction: "recvonly",
+      });
+    }
+
+    if (videoTrack) {
+  videoSenderRef.current = peer.addTrack(
+    videoTrack,
+    stream
+  );
+} else {
+  const videoTransceiver = peer.addTransceiver(
+    "video",
+    {
+      direction: "sendrecv",
+    }
+  );
+
+  videoSenderRef.current =
+    videoTransceiver.sender;
+}
+
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.emit("ice-candidate", {
+          candidate: event.candidate,
+        });
+      }
+    };
+
+    peer.ontrack = (event) => {
+  console.log(
+    "Remote track received:",
+    event.track.kind
+  );
+
+  // Avoid adding the same track twice
+  const alreadyAdded =
+    remoteStreamRef.current
+      .getTracks()
+      .some(
+        (track) => track.id === event.track.id
+      );
+
+  if (!alreadyAdded) {
+    remoteStreamRef.current.addTrack(
+      event.track
+    );
+  }
+
+  if (remoteVideo.current) {
+    remoteVideo.current.srcObject =
+      remoteStreamRef.current;
+
+    remoteVideo.current
+      .play()
+      .catch((error) => {
+        console.log(
+          "Remote autoplay blocked:",
+          error
+        );
+      });
+  }
+};
+
+    peer.onconnectionstatechange = () => {
+  const connectionState = peer.connectionState;
+
+  console.log(
+    "WebRTC connection state:",
+    connectionState
+  );
+
+  if (
+    connectionState === "new" ||
+    connectionState === "connecting"
+  ) {
+    setNetworkStats((previousStats) => ({
+      ...previousStats,
+      status: "Connecting",
+    }));
+  }
+
+  if (connectionState === "connected") {
+    hasConnectedRef.current = true;
+
+    setNetworkStats((previousStats) => ({
+      ...previousStats,
+      status: "Excellent",
+    }));
+  }
+
+  if (
+    connectionState === "disconnected" ||
+    connectionState === "failed" ||
+    connectionState === "closed"
+  ) {
+    setNetworkStats({
+      status: "Disconnected",
+      latency: 0,
+      bitrate: 0,
+      packetLoss: 0,
+    });
+  }
+};
+
+    peer.oniceconnectionstatechange = () => {
+      console.log(
+        "ICE connection state:",
+        peer.iceConnectionState
+      );
+    };
+
+    return peer;
+  }
+
+  async function addPendingCandidates() {
+    if (!peerRef.current?.remoteDescription) return;
+
+    for (const candidate of pendingCandidates.current) {
+      try {
+        await peerRef.current.addIceCandidate(candidate);
       } catch (error) {
-        console.log(error);
+        console.error("Pending ICE error:", error);
       }
     }
 
-    startCamera();
-    socket.emit("join-room", roomId);
-    socket.on("receive-message", (data)=>{
+    pendingCandidates.current = [];
+  }
 
-    setMessages((prev)=>[
-        ...prev,
-        `${data.user}: ${data.text}`
-    ]);
+  useEffect(() => {
+    const handleUserJoined = async () => {
+      try {
+        setNetworkStats((previousStats) => ({
+  ...previousStats,
+  status: "Connecting",
+}));
+        console.log("Second user joined. Creating offer.");
 
-});
-return ()=>{
+        const peer = createPeerConnection();
 
-    socket.off("receive-message");
+        const offer = await peer.createOffer();
 
+        await peer.setLocalDescription(offer);
+
+        socket.emit("offer", {
+          offer: peer.localDescription,
+        });
+      } catch (error) {
+        console.error("Offer creation error:", error);
+      }
+    };
+
+    const handleOffer = async ({ offer }) => {
+      try {
+        setNetworkStats((previousStats) => ({
+  ...previousStats,
+  status: "Connecting",
+}));
+        console.log("Offer received");
+
+        const peer = createPeerConnection();
+
+        await peer.setRemoteDescription(offer);
+
+        await addPendingCandidates();
+
+        const answer = await peer.createAnswer();
+
+        await peer.setLocalDescription(answer);
+
+        socket.emit("answer", {
+          answer: peer.localDescription,
+        });
+      } catch (error) {
+        console.error("Offer handling error:", error);
+      }
+    };
+
+    const handleAnswer = async ({ answer }) => {
+      try {
+        console.log("Answer received");
+
+        if (!peerRef.current) return;
+
+        await peerRef.current.setRemoteDescription(answer);
+
+        await addPendingCandidates();
+      } catch (error) {
+        console.error("Answer handling error:", error);
+      }
+    };
+
+    const handleIceCandidate = async ({ candidate }) => {
+      if (!candidate) return;
+
+      const iceCandidate = new RTCIceCandidate(candidate);
+
+      if (
+        peerRef.current &&
+        peerRef.current.remoteDescription
+      ) {
+        try {
+          await peerRef.current.addIceCandidate(iceCandidate);
+        } catch (error) {
+          console.error("ICE candidate error:", error);
+        }
+      } else {
+        pendingCandidates.current.push(iceCandidate);
+      }
+    };
+
+    const handleMessage = (data) => {
+      setMessages((previousMessages) => [
+        ...previousMessages,
+        `${data.user}: ${data.text}`,
+      ]);
+    };
+    const handleScreenShareStopped = () => {
+  console.log(
+    "Remote screen sharing stopped"
+  );
+
+  const videoTracks =
+    remoteStreamRef.current.getVideoTracks();
+
+  videoTracks.forEach((track) => {
+    track.stop();
+    remoteStreamRef.current.removeTrack(track);
+  });
+
+  if (remoteVideo.current) {
+    remoteVideo.current.pause();
+    remoteVideo.current.srcObject = null;
+    remoteVideo.current.load();
+  }
 };
+
+   const handleUserLeft = () => {
+  console.log("Remote user left");
+  setNetworkStats({
+  status: "Disconnected",
+  latency: 0,
+  bitrate: 0,
+  packetLoss: 0,
+});
+
+hasConnectedRef.current = true;
+
+  // Stop and remove all remote tracks
+  remoteStreamRef.current
+    .getTracks()
+    .forEach((track) => {
+      track.stop();
+      remoteStreamRef.current.removeTrack(track);
+    });
+
+  // Completely clear the remote video element
+  if (remoteVideo.current) {
+    remoteVideo.current.pause();
+    remoteVideo.current.srcObject = null;
+    remoteVideo.current.removeAttribute("src");
+    remoteVideo.current.load();
+  }
+
+  // Close the old WebRTC peer connection
+  if (peerRef.current) {
+    peerRef.current.close();
+    peerRef.current = null;
+  }
+
+  videoSenderRef.current = null;
+  pendingCandidates.current = [];
+
+  console.log("Remote video cleared");
+};
+
+    async function initializeMeeting() {
+      await startMedia();
+
+      socket.on("user-joined", handleUserJoined);
+      socket.on("offer", handleOffer);
+      socket.on("answer", handleAnswer);
+      socket.on("ice-candidate", handleIceCandidate);
+      socket.on("receive-message", handleMessage);
+      
+      socket.on(
+  "screen-share-stopped",
+  handleScreenShareStopped
+);
+      socket.on("user-left", handleUserLeft);
+      socket.emit("join-room", roomId);
+    }
+
+    initializeMeeting();
+
+    return () => {
+      socket.off("user-joined", handleUserJoined);
+      socket.off("offer", handleOffer);
+      socket.off("answer", handleAnswer);
+      socket.off("ice-candidate", handleIceCandidate);
+      socket.off("receive-message", handleMessage);
+      
+      socket.off(
+  "screen-share-stopped",
+  handleScreenShareStopped
+);
+      socket.off("user-left", handleUserLeft);
+
+     localStream.current
+  ?.getTracks()
+  .forEach((track) => {
+    track.stop();
+  });
+
+screenStreamRef.current
+  ?.getTracks()
+  .forEach((track) => {
+    track.stop();
+  });
+
+remoteStreamRef.current
+  .getTracks()
+  .forEach((track) => {
+    remoteStreamRef.current.removeTrack(track);
+  });
+
+peerRef.current?.close();
+
+peerRef.current = null;
+videoSenderRef.current = null;
+screenStreamRef.current = null; 
+    };
   }, [roomId]);
+  useEffect(() => {
+  async function checkNetworkStats() {
+    const peer = peerRef.current;
 
-  const sendMessage = () => {
+    if (!peer) {
+  setNetworkStats({
+    status: hasConnectedRef.current
+      ? "Disconnected"
+      : "Waiting",
+    latency: 0,
+    bitrate: 0,
+    packetLoss: 0,
+  });
 
-    if(message.trim()==="") return;
+  return;
+}
+
+    if (
+      peer.connectionState === "failed" ||
+      peer.connectionState === "disconnected" ||
+      peer.connectionState === "closed"
+    ) {
+      setNetworkStats({
+        status: "Disconnected",
+        latency: 0,
+        bitrate: 0,
+        packetLoss: 0,
+      });
+
+      return;
+    }
+
+    try {
+      const reports = await peer.getStats();
+
+      let totalBytesReceived = 0;
+      let packetsReceived = 0;
+      let packetsLost = 0;
+      let latency = 0;
+
+      reports.forEach((report) => {
+        // Incoming audio and video statistics
+        if (
+          report.type === "inbound-rtp" &&
+          !report.isRemote
+        ) {
+          totalBytesReceived +=
+            report.bytesReceived || 0;
+
+          packetsReceived +=
+            report.packetsReceived || 0;
+
+          packetsLost +=
+            report.packetsLost || 0;
+        }
+
+        // WebRTC connection latency
+        if (
+          report.type === "candidate-pair" &&
+          report.state === "succeeded" &&
+          (report.nominated || report.selected)
+        ) {
+          if (
+            typeof report.currentRoundTripTime ===
+            "number"
+          ) {
+            latency = Math.round(
+              report.currentRoundTripTime * 1000
+            );
+          }
+        }
+      });
+
+      const currentTime = Date.now();
+
+      let bitrate = 0;
+
+      if (
+        previousStatsTimeRef.current > 0 &&
+        totalBytesReceived >=
+          previousBytesRef.current
+      ) {
+        const byteDifference =
+          totalBytesReceived -
+          previousBytesRef.current;
+
+        const timeDifference =
+          (currentTime -
+            previousStatsTimeRef.current) /
+          1000;
+
+        if (timeDifference > 0) {
+          bitrate = Math.round(
+            (byteDifference * 8) /
+              timeDifference /
+              1000
+          );
+        }
+      }
+
+      previousBytesRef.current =
+        totalBytesReceived;
+
+      previousStatsTimeRef.current =
+        currentTime;
+
+      const totalPackets =
+        packetsReceived + packetsLost;
+
+      const packetLoss =
+        totalPackets > 0
+          ? Number(
+              (
+                (packetsLost / totalPackets) *
+                100
+              ).toFixed(1)
+            )
+          : 0;
+
+      let status = "Excellent";
+
+      if (latency === 0) {
+        status = "Connecting";
+      } else if (
+        latency <= 100 &&
+        packetLoss < 2
+      ) {
+        status = "Excellent";
+      } else if (
+        latency <= 200 &&
+        packetLoss < 5
+      ) {
+        status = "Good";
+      } else {
+        status = "Weak";
+      }
+
+      setNetworkStats({
+        status,
+        latency,
+        bitrate,
+        packetLoss,
+      });
+    } catch (error) {
+      console.error(
+        "Network stats error:",
+        error
+      );
+    }
+  }
+
+  checkNetworkStats();
+
+  const intervalId = setInterval(
+    checkNetworkStats,
+    2000
+  );
+
+  return () => {
+    clearInterval(intervalId);
+  };
+}, [roomId]);
+
+  function sendMessage() {
+    if (!message.trim()) return;
 
     socket.emit("send-message", {
-        user:name,
-        text:message
+      user: name,
+      text: message.trim(),
     });
 
     setMessage("");
+  }
 
-};
+  function toggleMic() {
+    const audioTrack =
+      localStream.current?.getAudioTracks()[0];
 
-  const toggleMic = () => {
+    if (!audioTrack) {
+      alert("No microphone is available.");
+      return;
+    }
 
-  if (!localStream.current) return;
+    audioTrack.enabled = !audioTrack.enabled;
+    setMicOn(audioTrack.enabled);
+  }
 
-  const audioTrack = localStream.current.getAudioTracks()[0];
+  function toggleCamera() {
+    const videoTrack =
+      localStream.current?.getVideoTracks()[0];
 
-  if (!audioTrack) return;
+    if (!videoTrack) {
+      alert("No camera is available on this device.");
+      return;
+    }
 
-  audioTrack.enabled = !audioTrack.enabled;
+    videoTrack.enabled = !videoTrack.enabled;
+    setCameraOn(videoTrack.enabled);
+  }
+  async function shareScreen() {
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    alert(
+      "Screen sharing is not supported on this device or browser."
+    );
+    return;
+  }
 
-  setMicOn(audioTrack.enabled);
+  if (!peerRef.current) {
+    alert(
+      "Wait for the other participant to connect before sharing."
+    );
+    return;
+  }
 
-};
+  try {
+    const screenStream =
+      await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: false,
+      });
+
+    const screenTrack =
+      screenStream.getVideoTracks()[0];
+
+    if (!screenTrack) {
+      alert("No screen video track found.");
+      return;
+    }
+
+    screenStreamRef.current = screenStream;
+
+    let sender = videoSenderRef.current;
+
+    // Fallback: find the video sender
+    if (!sender) {
+      sender = peerRef.current
+        .getSenders()
+        .find((currentSender) => {
+          return (
+            currentSender.track?.kind === "video"
+          );
+        });
+    }
+
+    if (!sender) {
+      alert(
+        "Video sender is not ready. Rejoin the room and try again."
+      );
+
+      screenStream
+        .getTracks()
+        .forEach((track) => track.stop());
+
+      return;
+    }
+
+    console.log(
+      "Replacing outgoing video with screen track"
+    );
+
+    await sender.replaceTrack(screenTrack);
+
+    videoSenderRef.current = sender;
+
+    // Local PC preview
+    if (localVideo.current) {
+      localVideo.current.srcObject =
+        screenStream;
+    }
+
+    setIsScreenSharing(true);
+
+    // User clicks browser-native Stop sharing
+    screenTrack.onended = () => {
+      stopScreenShare();
+    };
+
+  } catch (error) {
+    console.error(
+      "Screen sharing error:",
+      error
+    );
+  }
+}
+async function stopScreenShare() {
+  try {
+    const cameraTrack =
+      localStream.current?.getVideoTracks()[0];
+
+    const cameraIsAvailable =
+      cameraTrack &&
+      cameraTrack.readyState === "live";
+
+    const cameraIsOn =
+      cameraIsAvailable &&
+      cameraTrack.enabled &&
+      cameraOn;
+
+    if (cameraIsOn) {
+      // PC camera exists and is ON
+      await videoSenderRef.current?.replaceTrack(
+        cameraTrack
+      );
+
+      console.log(
+        "Screen sharing stopped. Camera restored."
+      );
+
+      // Do not clear the remote video.
+      // The phone will automatically receive the camera.
+    } else {
+      // PC has no camera or camera is OFF
+      await videoSenderRef.current?.replaceTrack(null);
+
+      // Tell the phone to clear the frozen screen
+      socket.emit("screen-share-stopped");
+
+      console.log(
+        "Screen sharing stopped. No active camera."
+      );
+    }
+
+    // Stop the captured screen track
+    screenStreamRef.current
+      ?.getTracks()
+      .forEach((track) => {
+        track.stop();
+      });
+
+    screenStreamRef.current = null;
+
+    // Restore local PC preview
+    if (localVideo.current) {
+      if (cameraIsOn) {
+        localVideo.current.srcObject =
+          localStream.current;
+
+        localVideo.current
+          .play()
+          .catch(console.error);
+      } else {
+        localVideo.current.srcObject = null;
+      }
+    }
+
+    setIsScreenSharing(false);
+
+  } catch (error) {
+    console.error(
+      "Stop screen sharing error:",
+      error
+    );
+  }
+}
+
+  function handleLeave() {
+  // First tell the server that this user is leaving
+  socket.emit("leave-room");
+
+  // Stop microphone and camera
+  localStream.current
+    ?.getTracks()
+    .forEach((track) => {
+      track.stop();
+    });
+
+  // Stop screen sharing if active
+  screenStreamRef.current
+    ?.getTracks()
+    .forEach((track) => {
+      track.stop();
+    });
+
+  // Remove received remote tracks
+  remoteStreamRef.current
+    .getTracks()
+    .forEach((track) => {
+      track.stop();
+      remoteStreamRef.current.removeTrack(track);
+    });
+
+  // Clear local video box
+  if (localVideo.current) {
+    localVideo.current.pause();
+    localVideo.current.srcObject = null;
+    localVideo.current.load();
+  }
+
+  // Clear remote video box
+  if (remoteVideo.current) {
+    remoteVideo.current.pause();
+    remoteVideo.current.srcObject = null;
+    remoteVideo.current.load();
+  }
+
+  // Close WebRTC connection
+  peerRef.current?.close();
+
+  peerRef.current = null;
+  videoSenderRef.current = null;
+  screenStreamRef.current = null;
+  pendingCandidates.current = [];
+
+  // Return to login/home screen
+  leaveMeeting();
+}
 
   return (
     <div className="meeting-room">
-
       <h1>Smart WebRTC</h1>
 
       <p>Room ID: {roomId}</p>
+      <div className="network-panel">
+  <h3>Network Status</h3>
+
+  <div className="network-status-row">
+    <span
+      className={`status-dot ${networkStats.status.toLowerCase()}`}
+    ></span>
+
+    <strong>{networkStats.status}</strong>
+  </div>
+
+  <div className="network-details">
+    <span>
+      Latency: {networkStats.latency} ms
+    </span>
+
+    <span>
+      Bitrate: {networkStats.bitrate} kbps
+    </span>
+
+    <span>
+      Packet Loss: {networkStats.packetLoss}%
+    </span>
+  </div>
+</div>
 
       <div className="meeting-container">
-
         <div>
-
           <div className="video-section">
-
             <video
               ref={localVideo}
               autoPlay
               playsInline
               muted
               className="video-box"
-            ></video>
-
-            <video
-            ref={remoteVideo}
-            autoPlay
-            playsInline
-            className="video-box"
             />
 
+            <video
+              ref={remoteVideo}
+              autoPlay
+              playsInline
+              className="video-box"
+            />
           </div>
 
           <div className="controls">
-
             <button onClick={toggleMic}>
-  {micOn ? "🎤 Mic On" : "🔇 Mic Off"}
-</button>
-            <button>📷 Camera</button>
-            <button>💻 Share</button>
+              {micOn ? "🎤 Mic On" : "🔇 Mic Off"}
+            </button>
+
+            <button onClick={toggleCamera}>
+              {cameraOn
+                ? "📷 Camera On"
+                : "🚫 Camera Off"}
+            </button>
+
             <button
-            style={{ background: "red" }}
-            onClick={leaveMeeting}
+  onClick={
+    isScreenSharing
+      ? stopScreenShare
+      : shareScreen
+  }
+>
+  {isScreenSharing
+    ? "⏹ Stop Sharing"
+    : "💻 Share Screen"}
+</button>
+
+            <button
+              style={{ background: "red" }}
+              onClick={handleLeave}
             >
               Leave
             </button>
-
           </div>
-
         </div>
 
         <div className="chat-panel">
-
           <h2>Chat</h2>
 
           <div className="messages">
-
-            {messages.map((msg, index) => (
-              <p key={index}>{msg}</p>
+            {messages.map((currentMessage, index) => (
+              <p key={index}>{currentMessage}</p>
             ))}
-
           </div>
 
           <input
             type="text"
             placeholder="Type message..."
             value={message}
-            onChange={(e) => setMessage(e.target.value)}
+            onChange={(event) =>
+              setMessage(event.target.value)
+            }
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                sendMessage();
+              }
+            }}
           />
 
-          <button onClick={sendMessage}>
-            Send
-          </button>
-
+          <button onClick={sendMessage}>Send</button>
         </div>
-
       </div>
-
     </div>
   );
 }

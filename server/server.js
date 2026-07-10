@@ -10,7 +10,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173",
+    origin: "*",
     methods: ["GET", "POST"],
   },
 });
@@ -66,19 +66,38 @@ io.on("connection", (socket) => {
     });
 
   });
+  socket.on("screen-share-stopped", () => {
+  socket.to(socket.roomId).emit("screen-share-stopped");
+});
+   socket.on("leave-room", () => {
+  const roomId = socket.roomId;
+
+  if (!roomId) return;
+
+  console.log(
+    `User ${socket.id} left room ${roomId}`
+  );
+
+  // Tell the other participant
+  socket.to(roomId).emit("user-left");
+
+  // Remove this user from the room
+  socket.leave(roomId);
+
+  // Clear the stored room ID
+  socket.roomId = null;
+});
 
   socket.on("disconnect", () => {
+  console.log("User disconnected:", socket.id);
 
+  if (socket.roomId) {
     socket.to(socket.roomId).emit("user-left");
-
-    console.log("Disconnected");
-
-  });
+  }
+});
 
 });
 
-server.listen(5000, () => {
-
+server.listen(5000, "0.0.0.0", () => {
   console.log("🚀 Server Running on Port 5000");
-
 });

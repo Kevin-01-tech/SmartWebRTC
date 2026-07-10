@@ -115,3 +115,75 @@ button:hover {
     width:100%;
     margin-bottom:10px;
 }
+.network-panel {
+  width: fit-content;
+  min-width: 500px;
+  margin: 18px auto;
+  padding: 14px 22px;
+  background: #1d293d;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  color: white;
+}
+
+.network-panel h3 {
+  margin: 0 0 10px;
+  text-align: center;
+}
+
+.network-status-row {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.network-details {
+  display: flex;
+  justify-content: center;
+  gap: 25px;
+  font-size: 14px;
+}
+
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  background: gray;
+}
+
+.status-dot.excellent {
+  background: #22c55e;
+}
+
+.status-dot.good {
+  background: #eab308;
+}
+
+.status-dot.weak {
+  background: #ef4444;
+}
+
+.status-dot.disconnected {
+  background: #ef4444;
+}
+
+.status-dot.connecting,
+.status-dot.waiting {
+  background: #94a3b8;
+}
+
+@media (max-width: 700px) {
+  .network-panel {
+    min-width: auto;
+    width: 90%;
+  }
+
+  .network-details {
+    flex-direction: column;
+    gap: 6px;
+    text-align: center;
+  }
+}

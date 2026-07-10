@@ -1,5 +1,7 @@
 import { io } from "socket.io-client";
 
-const socket = io("http://localhost:5000");
+const socket = io(
+  "https://wma-featured-bomb-invisible.trycloudflare.com"
+);
 
 export default socket;
