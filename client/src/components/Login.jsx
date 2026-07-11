@@ -1,28 +1,85 @@
-function Login({ name, setName, roomId, setRoomId, joinMeeting }) {
+function Login({
+  name,
+  setName,
+  roomId,
+  setRoomId,
+  joinMeeting,
+}) {
+  function handleJoin(event) {
+    event.preventDefault();
+
+    if (!name.trim() || !roomId.trim()) {
+      alert("Enter your name and room ID.");
+      return;
+    }
+
+    joinMeeting();
+  }
+
   return (
-    <div className="container">
-      <div className="login-box">
+    <main
+      style={{
+        position: "fixed",
+        inset: 0,
+        width: "100vw",
+        height: "100dvh",
+        display: "grid",
+        placeItems: "center",
+        padding: "20px",
+        overflowY: "auto",
+        background:
+          "radial-gradient(circle at top, #172554, #0b0f19 55%)",
+      }}
+    >
+      <form
+        className="login-box"
+        onSubmit={handleJoin}
+      >
+        <div className="login-logo">SW</div>
+
         <h1>Smart WebRTC</h1>
 
+        <p className="login-subtitle">
+          AI Network Predictive Communication
+        </p>
+
+        <label htmlFor="user-name">
+          Your name
+        </label>
+
         <input
+          id="user-name"
           type="text"
-          placeholder="Enter your Name"
+          placeholder="Enter your name"
           value={name}
-          onChange={(e) => setName(e.target.value)}
+          onChange={(event) =>
+            setName(event.target.value)
+          }
         />
+
+        <label htmlFor="room-id">
+          Room ID
+        </label>
 
         <input
+          id="room-id"
           type="text"
-          placeholder="Enter Room ID"
+          placeholder="Enter room ID"
           value={roomId}
-          onChange={(e) => setRoomId(e.target.value)}
+          onChange={(event) =>
+            setRoomId(event.target.value)
+          }
         />
 
-        <button onClick={joinMeeting}>
+        <button type="submit">
           Join Meeting
         </button>
-      </div>
-    </div>
+
+        <span className="login-note">
+          Secure peer-to-peer communication
+        </span>
+      </form>
+    </main>
   );
 }
 

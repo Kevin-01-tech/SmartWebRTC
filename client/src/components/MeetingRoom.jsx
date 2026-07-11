@@ -21,6 +21,8 @@ const screenStreamRef = useRef(null);
 const previousBytesRef = useRef(0);
 const previousStatsTimeRef = useRef(0);
 const hasConnectedRef = useRef(false);
+const networkHistoryRef = useRef([]);
+const lastOptimizationRef = useRef("");
 
 const [isScreenSharing, setIsScreenSharing] = useState(false);
 
@@ -37,7 +39,22 @@ const [isScreenSharing, setIsScreenSharing] = useState(false);
   latency: 0,
   bitrate: 0,
   packetLoss: 0,
+  jitter: 0,
 });
+const [networkPrediction, setNetworkPrediction] =
+  useState({
+    predictedQuality: "Waiting",
+    riskLevel: "Low",
+    message: "Waiting for network data.",
+    optimization: "Normal mode",
+  });
+const [meetingStartTime] = useState(Date.now());
+
+const [showSummary, setShowSummary] =
+  useState(false);
+
+const [meetingSummary, setMeetingSummary] =
+  useState(null);
 
   async function startMedia() {
     const combinedStream = new MediaStream();
@@ -208,11 +225,20 @@ const [isScreenSharing, setIsScreenSharing] = useState(false);
     connectionState === "closed"
   ) {
     setNetworkStats({
-      status: "Disconnected",
-      latency: 0,
-      bitrate: 0,
-      packetLoss: 0,
-    });
+  status: "Disconnected",
+  latency: 0,
+  bitrate: 0,
+  packetLoss: 0,
+  jitter: 0,
+});
+setNetworkPrediction({
+    predictedQuality: "Disconnected",
+    riskLevel: "High",
+    message: "The WebRTC connection is unavailable.",
+    optimization: "Connection stopped",
+  });
+   networkHistoryRef.current = [];
+   lastOptimizationRef.current = "";
   }
 };
 
@@ -239,6 +265,7 @@ const [isScreenSharing, setIsScreenSharing] = useState(false);
 
     pendingCandidates.current = [];
   }
+
 
   useEffect(() => {
     const handleUserJoined = async () => {
@@ -355,7 +382,20 @@ const [isScreenSharing, setIsScreenSharing] = useState(false);
   latency: 0,
   bitrate: 0,
   packetLoss: 0,
+  jitter: 0,
 });
+setNetworkPrediction({
+  predictedQuality: "Disconnected",
+  riskLevel: "High",
+  message:
+    "The remote participant has disconnected.",
+  optimization: "Connection stopped",
+});
+
+networkHistoryRef.current = [];
+lastOptimizationRef.current = "";
+previousBytesRef.current = 0;
+previousStatsTimeRef.current = 0;
 
 hasConnectedRef.current = true;
 
@@ -442,21 +482,244 @@ peerRef.current?.close();
 peerRef.current = null;
 videoSenderRef.current = null;
 screenStreamRef.current = null; 
+
+networkHistoryRef.current = [];
+lastOptimizationRef.current = "";
+
+previousBytesRef.current = 0;
+previousStatsTimeRef.current = 0;
     };
   }, [roomId]);
+
+  function predictNetworkQuality(history) {
+  if (history.length < 3) {
+    return {
+      predictedQuality: "Collecting Data",
+      riskLevel: "Low",
+      message: "Collecting recent network samples.",
+    };
+  }
+
+  const recent = history.slice(-5);
+
+  const first = recent[0];
+  const last = recent[recent.length - 1];
+
+  let riskScore = 0;
+
+  // Latency trend
+  if (last.latency > first.latency + 80) {
+    riskScore += 2;
+  } else if (last.latency > first.latency + 30) {
+    riskScore += 1;
+  }
+
+  // Packet-loss trend
+  if (last.packetLoss > first.packetLoss + 3) {
+    riskScore += 2;
+  } else if (
+    last.packetLoss > first.packetLoss + 1
+  ) {
+    riskScore += 1;
+  }
+
+  // Bitrate trend
+  if (
+    first.bitrate > 0 &&
+    last.bitrate < first.bitrate * 0.5
+  ) {
+    riskScore += 2;
+  } else if (
+    first.bitrate > 0 &&
+    last.bitrate < first.bitrate * 0.75
+  ) {
+    riskScore += 1;
+  }
+
+  // Current jitter
+  if (last.jitter > 50) {
+    riskScore += 2;
+  } else if (last.jitter > 30) {
+    riskScore += 1;
+  }
+
+  // Current bad network values
+  if (last.latency > 250) {
+    riskScore += 2;
+  }
+
+  if (last.packetLoss >= 5) {
+    riskScore += 2;
+  }
+
+  if (
+    last.bitrate > 0 &&
+    last.bitrate < 150
+  ) {
+    riskScore += 2;
+  }
+
+  if (riskScore >= 5) {
+    return {
+      predictedQuality: "Weak",
+      riskLevel: "High",
+      message:
+        "Network degradation is likely within the next few samples.",
+    };
+  }
+
+  if (riskScore >= 2) {
+    return {
+      predictedQuality: "Good",
+      riskLevel: "Medium",
+      message:
+        "Network quality may decrease soon.",
+    };
+  }
+
+  return {
+    predictedQuality: "Excellent",
+    riskLevel: "Low",
+    message:
+      "The connection is predicted to remain stable.",
+  };
+}
+async function applyNetworkOptimization(
+  predictedQuality
+) {
+  const sender = videoSenderRef.current;
+
+  // No outgoing video track is active
+  if (
+    !sender ||
+    !sender.track ||
+    sender.track.kind !== "video"
+  ) {
+    setNetworkPrediction((previous) => ({
+      ...previous,
+      optimization:
+        "No active video track to optimize",
+    }));
+
+    return;
+  }
+
+  let mode = "normal";
+  let maxBitrate = 1000000;
+  let maxFramerate = 30;
+  let optimizationMessage =
+    "Full video quality enabled";
+
+  if (predictedQuality === "Weak") {
+    mode = "low";
+
+    // 150 kbps
+    maxBitrate = 150000;
+
+    // 10 FPS
+    maxFramerate = 10;
+
+    optimizationMessage =
+      "Low bandwidth mode activated";
+  } else if (predictedQuality === "Good") {
+    mode = "medium";
+
+    // 400 kbps
+    maxBitrate = 400000;
+
+    // 20 FPS
+    maxFramerate = 20;
+
+    optimizationMessage =
+      "Balanced quality mode activated";
+  }
+
+  // Avoid applying the same setting repeatedly
+  if (lastOptimizationRef.current === mode) {
+    return;
+  }
+
+  try {
+    const parameters = sender.getParameters();
+
+    if (
+      !parameters.encodings ||
+      parameters.encodings.length === 0
+    ) {
+      parameters.encodings = [{}];
+    }
+
+    parameters.encodings[0].maxBitrate =
+      maxBitrate;
+
+    parameters.encodings[0].maxFramerate =
+      maxFramerate;
+
+    await sender.setParameters(parameters);
+
+    lastOptimizationRef.current = mode;
+
+    setNetworkPrediction((previous) => ({
+      ...previous,
+      optimization: optimizationMessage,
+    }));
+
+    console.log(
+      "Adaptive optimization applied:",
+      {
+        mode,
+        maxBitrate,
+        maxFramerate,
+      }
+    );
+  } catch (error) {
+    console.error(
+      "Video optimization error:",
+      error
+    );
+
+    setNetworkPrediction((previous) => ({
+      ...previous,
+      optimization:
+        "Optimization could not be applied",
+    }));
+  }
+}
+
   useEffect(() => {
   async function checkNetworkStats() {
     const peer = peerRef.current;
 
     if (!peer) {
+  const status = hasConnectedRef.current
+    ? "Disconnected"
+    : "Waiting";
+
   setNetworkStats({
-    status: hasConnectedRef.current
-      ? "Disconnected"
-      : "Waiting",
+    status,
     latency: 0,
     bitrate: 0,
     packetLoss: 0,
+    jitter: 0,
   });
+
+  setNetworkPrediction({
+    predictedQuality: status,
+    riskLevel:
+      status === "Disconnected"
+        ? "High"
+        : "Low",
+    message:
+      status === "Disconnected"
+        ? "The remote participant has disconnected."
+        : "Waiting for another participant.",
+    optimization:
+      status === "Disconnected"
+        ? "Connection stopped"
+        : "Normal mode",
+  });
+
+  networkHistoryRef.current = [];
 
   return;
 }
@@ -471,7 +734,20 @@ screenStreamRef.current = null;
         latency: 0,
         bitrate: 0,
         packetLoss: 0,
+        jitter: 0,
       });
+
+      setNetworkPrediction({
+        predictedQuality: "Disconnected",
+        riskLevel: "High",
+        message: "The WebRTC connection is unavailable.",
+        optimization: "Connection stopped",
+      });
+       networkHistoryRef.current = [];  
+       lastOptimizationRef.current = "";
+
+previousBytesRef.current = 0;
+previousStatsTimeRef.current = 0;
 
       return;
     }
@@ -483,9 +759,9 @@ screenStreamRef.current = null;
       let packetsReceived = 0;
       let packetsLost = 0;
       let latency = 0;
+      let jitter = 0;
 
       reports.forEach((report) => {
-        // Incoming audio and video statistics
         if (
           report.type === "inbound-rtp" &&
           !report.isRemote
@@ -498,9 +774,19 @@ screenStreamRef.current = null;
 
           packetsLost +=
             report.packetsLost || 0;
+
+          if (
+            typeof report.jitter === "number"
+          ) {
+            jitter = Math.max(
+              jitter,
+              Math.round(
+                report.jitter * 1000
+              )
+            );
+          }
         }
 
-        // WebRTC connection latency
         if (
           report.type === "candidate-pair" &&
           report.state === "succeeded" &&
@@ -569,23 +855,52 @@ screenStreamRef.current = null;
         status = "Connecting";
       } else if (
         latency <= 100 &&
-        packetLoss < 2
+        packetLoss < 2 &&
+        jitter < 30
       ) {
         status = "Excellent";
       } else if (
         latency <= 200 &&
-        packetLoss < 5
+        packetLoss < 5 &&
+        jitter < 50
       ) {
         status = "Good";
       } else {
         status = "Weak";
       }
 
+      const newReading = {
+        latency,
+        bitrate,
+        packetLoss,
+        jitter,
+        timestamp: Date.now(),
+      };
+
+      networkHistoryRef.current = [
+        ...networkHistoryRef.current,
+        newReading,
+      ].slice(-5);
+
+      const prediction =
+        predictNetworkQuality(
+          networkHistoryRef.current
+        );
+        await applyNetworkOptimization(
+  prediction.predictedQuality
+);
+
+      setNetworkPrediction((previous) => ({
+        ...previous,
+        ...prediction,
+      }));
+
       setNetworkStats({
         status,
         latency,
         bitrate,
         packetLoss,
+        jitter,
       });
     } catch (error) {
       console.error(
@@ -707,6 +1022,11 @@ screenStreamRef.current = null;
     await sender.replaceTrack(screenTrack);
 
     videoSenderRef.current = sender;
+    lastOptimizationRef.current = "";
+
+await applyNetworkOptimization(
+  networkPrediction.predictedQuality
+);
 
     // Local PC preview
     if (localVideo.current) {
@@ -798,6 +1118,79 @@ async function stopScreenShare() {
     );
   }
 }
+function generateMeetingSummary() {
+  const durationMs =
+    Date.now() - meetingStartTime;
+
+  const durationMinutes = Math.max(
+    1,
+    Math.round(durationMs / 60000)
+  );
+
+  const actionKeywords = [
+    "will",
+    "need to",
+    "must",
+    "complete",
+    "finish",
+    "submit",
+    "test",
+    "deploy",
+    "prepare",
+    "create",
+    "update",
+  ];
+
+  const actionItems = messages.filter(
+    (currentMessage) =>
+      actionKeywords.some((keyword) =>
+        currentMessage
+          .toLowerCase()
+          .includes(keyword)
+      )
+  );
+
+  const summary = {
+    duration: durationMinutes,
+
+    participants: [
+      name,
+      "Remote Participant",
+    ],
+
+    discussionPoints:
+      messages.length > 0
+        ? messages
+        : [
+            "No chat discussion was recorded.",
+          ],
+
+    actionItems:
+      actionItems.length > 0
+        ? actionItems
+        : [
+            "No clear action items were detected.",
+          ],
+
+    networkStatus:
+  networkStats.status === "Waiting" ||
+  networkStats.status === "Disconnected"
+    ? "Meeting ended"
+    : networkStats.status,
+
+    finalSuggestion:
+  networkStats.status === "Excellent"
+    ? "The meeting connection was stable."
+    : networkStats.status === "Good"
+    ? "The meeting connection was usable with minor issues."
+    : networkStats.status === "Weak"
+    ? "The meeting experienced network-quality issues."
+    : "The meeting ended successfully.",
+  };
+
+  setMeetingSummary(summary);
+  setShowSummary(true);
+}
 
   function handleLeave() {
   // First tell the server that this user is leaving
@@ -846,16 +1239,106 @@ async function stopScreenShare() {
   videoSenderRef.current = null;
   screenStreamRef.current = null;
   pendingCandidates.current = [];
+  networkHistoryRef.current = [];
+lastOptimizationRef.current = "";
+
+previousBytesRef.current = 0;
+previousStatsTimeRef.current = 0;
 
   // Return to login/home screen
   leaveMeeting();
 }
+if (showSummary && meetingSummary) {
+  return (
+    <div className="summary-page">
+      <div className="summary-card">
+        <h1>AI Meeting Summary</h1>
+
+        <div className="summary-section">
+          <h3>Meeting Information</h3>
+
+          <p>
+            <strong>Duration:</strong>{" "}
+            {meetingSummary.duration} minute(s)
+          </p>
+
+          <p>
+            <strong>Participants:</strong>{" "}
+            {meetingSummary.participants.join(
+              ", "
+            )}
+          </p>
+
+          <p>
+            <strong>
+              Network Quality:
+            </strong>{" "}
+            {meetingSummary.networkStatus}
+          </p>
+        </div>
+
+        <div className="summary-section">
+          <h3>Key Discussion Points</h3>
+
+          <ul>
+            {meetingSummary.discussionPoints.map(
+              (point, index) => (
+                <li key={index}>
+                  {point}
+                </li>
+              )
+            )}
+          </ul>
+        </div>
+
+        <div className="summary-section">
+          <h3>Action Items</h3>
+
+          <ul>
+            {meetingSummary.actionItems.map(
+              (item, index) => (
+                <li key={index}>
+                  {item}
+                </li>
+              )
+            )}
+          </ul>
+        </div>
+
+        <div className="summary-section">
+          <h3>Meeting Analysis</h3>
+
+          <p>
+            {meetingSummary.finalSuggestion}
+          </p>
+        </div>
+
+        <button
+          className="leave-summary-button"
+          onClick={handleLeave}
+        >
+          Leave Meeting
+        </button>
+      </div>
+    </div>
+  );
+}
 
   return (
     <div className="meeting-room">
-      <h1>Smart WebRTC</h1>
+      <header className="meeting-header">
+  <div>
+    <h1>Smart WebRTC</h1>
 
-      <p>Room ID: {roomId}</p>
+    <p>
+      AI-Powered Predictive Communication Platform
+    </p>
+  </div>
+
+  <div className="room-badge">
+    Room: {roomId}
+  </div>
+</header>
       <div className="network-panel">
   <h3>Network Status</h3>
 
@@ -879,58 +1362,160 @@ async function stopScreenShare() {
     <span>
       Packet Loss: {networkStats.packetLoss}%
     </span>
+
+    <span>
+  Jitter: {networkStats.jitter} ms
+</span>
   </div>
 </div>
+<div className="prediction-panel">
+  <h3>AI Network Prediction Engine</h3>
 
+  <p>
+    <strong>Current Quality:</strong>{" "}
+    {networkStats.status}
+  </p>
+
+  <p>
+    <strong>Predicted Quality:</strong>{" "}
+    {networkPrediction.predictedQuality}
+  </p>
+
+  <p>
+    <strong>Risk Level:</strong>{" "}
+    {networkPrediction.riskLevel}
+  </p>
+
+  <p>
+    <strong>Prediction:</strong>{" "}
+    {networkPrediction.message}
+  </p>
+
+  <p>
+    <strong>Optimization:</strong>{" "}
+    {networkPrediction.optimization}
+  </p>
+  <p>
+  <strong>Adaptive Action:</strong>{" "}
+
+  {networkPrediction.predictedQuality === "Weak"
+    ? "Video reduced to 150 kbps and 10 FPS to protect call stability."
+    : networkPrediction.predictedQuality === "Good"
+    ? "Video adjusted to 400 kbps and 20 FPS for balanced quality."
+    : networkPrediction.predictedQuality === "Excellent"
+    ? "Video restored to 1 Mbps and 30 FPS."
+    : networkPrediction.predictedQuality ===
+      "Disconnected"
+    ? "Optimization stopped because the participant disconnected."
+    : "Waiting for enough network information."}
+</p>
+</div>
       <div className="meeting-container">
         <div>
           <div className="video-section">
-            <video
-              ref={localVideo}
-              autoPlay
-              playsInline
-              muted
-              className="video-box"
-            />
+  <div className="video-card">
+    <video
+      ref={localVideo}
+      autoPlay
+      playsInline
+      muted
+      className="video-box"
+    />
 
-            <video
-              ref={remoteVideo}
-              autoPlay
-              playsInline
-              className="video-box"
-            />
-          </div>
+    <div className="participant-label">
+      {name} (You)
+    </div>
 
-          <div className="controls">
-            <button onClick={toggleMic}>
-              {micOn ? "🎤 Mic On" : "🔇 Mic Off"}
-            </button>
+    {!cameraOn && !isScreenSharing && (
+      <div className="camera-placeholder">
+        <div className="avatar-circle">
+          {name?.charAt(0)?.toUpperCase()}
+        </div>
 
-            <button onClick={toggleCamera}>
-              {cameraOn
-                ? "📷 Camera On"
-                : "🚫 Camera Off"}
-            </button>
+        <p>Camera is off</p>
+      </div>
+    )}
+  </div>
 
-            <button
-  onClick={
-    isScreenSharing
-      ? stopScreenShare
-      : shareScreen
-  }
->
-  {isScreenSharing
-    ? "⏹ Stop Sharing"
-    : "💻 Share Screen"}
-</button>
+  <div className="video-card">
+    <video
+      ref={remoteVideo}
+      autoPlay
+      playsInline
+      className="video-box"
+    />
 
-            <button
-              style={{ background: "red" }}
-              onClick={handleLeave}
-            >
-              Leave
-            </button>
-          </div>
+    <div className="participant-label">
+      Remote Participant
+    </div>
+  </div>
+</div>
+
+        <div className="controls">
+  <button
+    className={`control-button ${
+      micOn ? "active" : "inactive"
+    }`}
+    onClick={toggleMic}
+  >
+    <span className="control-icon">
+      {micOn ? "🎤" : "🔇"}
+    </span>
+
+    <span>
+      {micOn ? "Mute" : "Unmute"}
+    </span>
+  </button>
+
+  <button
+    className={`control-button ${
+      cameraOn ? "active" : "inactive"
+    }`}
+    onClick={toggleCamera}
+  >
+    <span className="control-icon">
+      {cameraOn ? "📷" : "🚫"}
+    </span>
+
+    <span>
+      {cameraOn
+        ? "Stop Video"
+        : "Start Video"}
+    </span>
+  </button>
+
+  <button
+    className={`control-button ${
+      isScreenSharing ? "sharing" : ""
+    }`}
+    onClick={
+      isScreenSharing
+        ? stopScreenShare
+        : shareScreen
+    }
+  >
+    <span className="control-icon">
+      {isScreenSharing ? "⏹" : "🖥️"}
+    </span>
+
+    <span>
+      {isScreenSharing
+        ? "Stop Share"
+        : "Share Screen"}
+    </span>
+  </button>
+
+  <button
+    className="control-button end-call"
+    onClick={generateMeetingSummary}
+  >
+    <span className="control-icon">
+      📞
+    </span>
+
+    <span>End Meeting</span>
+  </button>
+</div>
         </div>
 
         <div className="chat-panel">

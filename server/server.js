@@ -97,7 +97,12 @@ io.on("connection", (socket) => {
 });
 
 });
+app.get("/", (req, res) => {
+  res.send("SmartWebRTC server is running");
+});
 
-server.listen(5000, "0.0.0.0", () => {
-  console.log("🚀 Server Running on Port 5000");
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });

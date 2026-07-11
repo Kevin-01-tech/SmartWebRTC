@@ -1,7 +1,11 @@
 import { io } from "socket.io-client";
 
-const socket = io(
-  "https://wma-featured-bomb-invisible.trycloudflare.com"
-);
+const serverUrl =
+  import.meta.env.VITE_SERVER_URL ||
+  "http://localhost:5000";
+
+const socket = io(serverUrl, {
+  transports: ["websocket", "polling"],
+});
 
 export default socket;
